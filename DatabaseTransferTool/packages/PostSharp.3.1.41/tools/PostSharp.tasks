@@ -23,6 +23,8 @@
     <PostSharpProject Condition=" '$(PostSharpProject)'=='' AND Exists('$(MSBuildProjectDirectory)\$(MSBuildProjectName).$(Configuration).psproj') ">$(MSBuildProjectDirectory)\$(MSBuildProjectName).$(Configuration).psproj</PostSharpProject>
     <PostSharpProject Condition=" '$(PostSharpProject)'=='' AND Exists('$(MSBuildProjectDirectory)\$(MSBuildProjectName).psproj') ">$(MSBuildProjectDirectory)\$(MSBuildProjectName).psproj</PostSharpProject>
 
+    
+
     <!-- PostSharp properties -->
     <PostSharpBuild Condition="'$(PostSharpBuild)'==''">Release</PostSharpBuild>
     <PostSharpIgnoreError Condition="'$(PostSharpIgnoreError)'==''">False</PostSharpIgnoreError>
@@ -47,6 +49,7 @@
     <PostSharpHost Condition="'$(PostSharpHost)'==''">PipeServer</PostSharpHost>
     <PostSharpConstraintVerificationEnabled Condition="'$(PostSharpConstraintVerificationEnabled)'==''">True</PostSharpConstraintVerificationEnabled>
     <SkipPostSharp Condition="'$(SkipPostSharp)'==''">False</SkipPostSharp>
+    <PostSharpChangeAppConfigDisabled Condition="'$(PostSharpChangeAppConfigDisabled)'==''">False</PostSharpChangeAppConfigDisabled>
 
     <!-- Sets the tool directory in PostSharp's own development environment -->
     <PostSharp30ToolDirectory Condition="'$(PostSharp30ToolDirectory)'=='' AND Exists('$(MSBuildThisFileDirectory)\bin.$(PostSharpBuild)\PostSharp.MSBuild.v$(PostSharp30Version).$(PostSharpBuild).dll')">$(MSBuildThisFileDirectory)</PostSharp30ToolDirectory>

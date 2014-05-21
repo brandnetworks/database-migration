@@ -1,5 +1,16 @@
 ﻿param($installPath, $toolsPath, $package, $project)
 
+
+function PathToUri([string] $path)
+{
+    return new-object Uri('file://' + $path.Replace("%","%25").Replace("#","%23").Replace("$","%24").Replace("+","%2B").Replace(",","%2C").Replace("=","%3D").Replace("@","%40").Replace("~","%7E").Replace("^","%5E"))
+}
+
+function UriToPath([System.Uri] $uri)
+{
+    return [System.Uri]::UnescapeDataString( $uri.ToString() ).Replace([System.IO.Path]::AltDirectorySeparatorChar, [System.IO.Path]::DirectorySeparatorChar)
+}
+
 $targetsFile = [System.IO.Path]::Combine($toolsPath, 'PostSharp.targets')
 
 # Need to load MSBuild assembly if it's not loaded yet.
@@ -8,22 +19,91 @@ Add-Type -AssemblyName 'Microsoft.Build, Version=4.0.0.0, Culture=neutral, Publi
 # Grab the loaded MSBuild project for the project
 $msbuild = [Microsoft.Build.Evaluation.ProjectCollection]::GlobalProjectCollection.GetLoadedProjects($project.FullName) | Select-Object -First 1
 
-# Remove the property DontImportPostSharp
-$msbuild.Xml.Properties | Where-Object {$_.Name.ToLowerInvariant() -eq "dontimportpostsharp" } | Foreach { 
-	$_.Parent.RemoveChild( $_ ) 
-	"Removed property DontImportPostSharp"
+# Make the path to the targets file relative.
+$projectUri = PathToUri $project.FullName
+$targetUri = PathToUri $targetsFile
+
+$relativePath = UriToPath $projectUri.MakeRelativeUri($targetUri)
+
+# Remove elements from previous installations or versions.
+$itemsToRemove = @()
+$itemsToRemove += $msbuild.Xml.Properties | Where-Object {$_.Name.ToLowerInvariant() -eq "dontimportpostsharp" }
+# $itemsToRemove += $msbuild.Xml.Properties | Where-Object {$_.Name.ToLowerInvariant().EndsWith("postsharpignoredpackages") } # Don't remove this so that it stays during upgrades.
+$itemsToRemove += $msbuild.Xml.Imports | Where-Object {$_.Project.ToLowerInvariant().EndsWith("postsharp.targets") } 
+$itemsToRemove += $msbuild.Xml.Targets | Where-Object {$_.Name.ToLowerInvariant() -eq "ensurepostsharpimported" }
+
+
+if ($itemsToRemove -and $itemsToRemove.length)
+{
+    foreach ($itemToRemove in $itemsToRemove)
+    {
+        $itemToRemove.Parent.RemoveChild($itemToRemove) | out-null
+    }
 }
 
-# Remove imports to PostSharp.targets
-$msbuild.Xml.Imports | Where-Object {$_.Project.ToLowerInvariant().EndsWith("postsharp.targets") } | Foreach { 
-	$_.Parent.RemoveChild( $_ ) 
-	[string]::Format( "Removed import of '{0}'" , $_.Project )
+# Remove references from PostSharp 1.* and 2.*.
+$referencesToRemove = @()
+$referencesToRemove += $project.Object.References | Where-Object {$_.Identity.ToLowerInvariant().StartsWith("postsharp.public") } 
+$referencesToRemove += $project.Object.References | Where-Object {$_.Identity.ToLowerInvariant().StartsWith("postsharp.laos") } 
+
+if ($referencesToRemove -and $referencesToRemove.length)
+{
+    foreach ($referenceToRemove in $referencesToRemove)
+    {
+        $referenceToRemove.Remove()
+    }
 }
+
+
+
+# Set property DontImportPostSharp to prevent locally-installed previous versions of PostSharp to interfere.
+$msbuild.Xml.AddProperty( "DontImportPostSharp", "True" ) | Out-Null
+
+# Add import to PostSharp.targets
+$import = $msbuild.Xml.AddImport($relativePath)
+$import.set_Condition( "Exists('$relativePath')" ) | Out-Null
+[string]::Format("Added import of '{0}'.", $relativePath )
+
+ # Add a target to fail the build when our targets are not imported
+$target = $msbuild.Xml.AddTarget("EnsurePostSharpImported")
+$target.BeforeTargets = "BeforeBuild"
+$target.Condition = "'`$(PostSharp30Imported)' == ''"
+
+# if the targets don't exist at the time the target runs, package restore didn't run
+$errorTask = $target.AddTask("Error")
+$errorTask.Condition = "!Exists('$relativePath')"
+$errorTask.SetParameter("Text", "This project references NuGet package(s) that are missing on this computer. Enable NuGet Package Restore to download them.  For more information, see http://www.postsharp.net/links/nuget-restore.");
+
+# if the targets exist at the time the target runs, package restore ran but the build didn't import the targets.
+$errorTask = $target.AddTask("Error")
+$errorTask.Condition = "Exists('$relativePath')"
+$errorTask.SetParameter("Text", "The build restored NuGet packages. Build the project again to include these packages in the build. For more information, see http://www.postsharp.net/links/nuget-restore.");
+
+# For all the assembly references installed by this package - set CopyLocal = true
+$pakcageRefs = $package.AssemblyReferences | %{$_.Name}
+foreach ($reference in $project.Object.References)
+{
+    if ($pakcageRefs -contains $reference.Name + ".dll")
+    {
+        # To persist the CopyLocal value we have to change it from true to false first
+        $reference.CopyLocal = $false;
+        $reference.CopyLocal = $true;
+    }
+}
+
+$project.Save()
+$project.Object.Refresh()
+
+# Asynchronously run setup wizard if necessary. Since the setup wizard is compressed in PostSharp-Tools.exe, the easiest is to run it through MSBuild.
+$msbuildExe = [System.IO.Path]::Combine( [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(), "msbuild.exe")
+"Starting $msbuildExe"
+Start-Process -FilePath $msbuildExe -ArgumentList @("""$toolsPath\PostSharp.targets""", "/t:PostSharp30InstallVsx /p:BuildingInsideVisualStudio=True") -WindowStyle Hidden
+	
 # SIG # Begin signature block
 # MIId/AYJKoZIhvcNAQcCoIId7TCCHekCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUyM3II4aF2FAk5B8jBlUy7ZO4
-# KtagghjsMIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUMgYFfLXdT2FXKfdCMvCogCHc
+# HtSgghjsMIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
 # AQUFADCBizELMAkGA1UEBhMCWkExFTATBgNVBAgTDFdlc3Rlcm4gQ2FwZTEUMBIG
 # A1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEdMBsGA1UECxMUVGhh
 # d3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBpbmcg
@@ -162,22 +242,22 @@ $msbuild.Xml.Imports | Where-Object {$_.Project.ToLowerInvariant().EndsWith("pos
 # YSAoYykxMDEuMCwGA1UEAxMlVmVyaVNpZ24gQ2xhc3MgMyBDb2RlIFNpZ25pbmcg
 # MjAxMCBDQQIQDLZ6+7O4pymGCOAOlM81PjAJBgUrDgMCGgUAoHgwGAYKKwYBBAGC
 # NwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgor
-# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUMj3/3Xd6
-# nCmPcwmRgOTIBLl+1XowDQYJKoZIhvcNAQEBBQAEggEAQxPF7xiChP0uXlTl8wYK
-# 7YYV09qw/SAAFcjHA5Nq7tooz4/AbrBRb/tdle44gMAsRiQXtT2uvjEBj01rSr09
-# ToEUdz14dzBLMXNDSqjFFwC/4x4N2/kWtNxY/SZYlfpxk8Xijru+JkRLCcNpo/Rs
-# ChibYob7gg39OF21NNcGZwLw8pEZlF8Qh1v476UviP0fQGrwjSsWehvVryOaMbok
-# PzT/u0FF1BPoSEXEP3ZP0bJ3Y0cQWZePSu1NIN6yB1stt9DJOQ3CdX8QhZp3ms7N
-# +s0oH/AZbNABZU6je1wtibcc9Ud0pJt/ZgZf4J/JqDVeXPDmf6pdmYSW+NlPgdCY
-# OKGCAgswggIHBgkqhkiG9w0BCQYxggH4MIIB9AIBATByMF4xCzAJBgNVBAYTAlVT
+# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUC1rsB4PK
+# JlTkgnaL4IXf3yeFHVkwDQYJKoZIhvcNAQEBBQAEggEAEIWjL3HTBBtMrH08dmoq
+# iXHmJKJjEx6ADGpJ1f2TmZkVLCI7eQfbzYukTl8hkieUQupsSrTawSpmJ5z9BZAP
+# tI2ToYQxC13qiFKq/vF3XgAtS56q3P514Ta8a59vPcp3PYSfe2i+ufgdzWn/0wwH
+# Rdbk9W9R03XDQc+C0/mRZCdwqR8sBPVXWDw5A/zfYzD8OuMqWPrvxueVeZiLJW+n
+# Rdy2EyV7uIpmK8c1rT5Vok2CcLC7V7FRPDL9MTYlg/9sBsVomSJ+DMLj8T7k4w5n
+# K9ChGw/gLDzu59/1ADD0UVPpt9URe7OXOGhTurfZot7MplQ/MRS+t73fOiEny/79
+# GaGCAgswggIHBgkqhkiG9w0BCQYxggH4MIIB9AIBATByMF4xCzAJBgNVBAYTAlVT
 # MR0wGwYDVQQKExRTeW1hbnRlYyBDb3Jwb3JhdGlvbjEwMC4GA1UEAxMnU3ltYW50
 # ZWMgVGltZSBTdGFtcGluZyBTZXJ2aWNlcyBDQSAtIEcyAhAOz/Q4yP6/NW4E2GqY
 # GxpQMAkGBSsOAwIaBQCgXTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqG
-# SIb3DQEJBTEPFw0xMzA5MjAxODIyMjJaMCMGCSqGSIb3DQEJBDEWBBQxifl/r6vI
-# CEmNbeFTOnpNA/MLnjANBgkqhkiG9w0BAQEFAASCAQCTX3GaHskoxNdqFfwPQp+F
-# A03txy0oZANC6APTXXM/hwSUVU2sQqIM7UDIAT+O4kZvCTZ7FUpjVBaRfoUbVH3P
-# UcyclyMtznDO+JoxAFw7bDp2jIo/HjNt0MUGXgRVPWrZGi2cjylDPPQ6V39HkNjm
-# 1hlq9eQ3TLqTxp05RPIFV+2UhKm6a+N1U7COEEqNJdFJFrA5cjyFc1h1QLDoVJm8
-# g2G7wvVdvCTQYvcr6jMI9fJsRxDjgR9H6jjcd5tmQi7j57z7JVS7pjlw2CrOK/FN
-# NAaksDG5+Lo7st2KEFp3x+vYBEbfTOOeXYCBrD3wu9e22XcI3Bkv9JnIdlJJtzVg
+# SIb3DQEJBTEPFw0xNDA1MjExMTQ2NDJaMCMGCSqGSIb3DQEJBDEWBBRfFzsQF2q0
+# v8CDuOz+8M7YKyp0WTANBgkqhkiG9w0BAQEFAASCAQCA329LNHB6YZaE8y/KmOt4
+# grpTqUYAzcpPQmVzvNe0e5lBASAmFu5TpjeE3tWYkNYgEdVK2OsnL7prrBq2UHSR
+# vFAPRZjn4W26bRDiyvh90/GIxTAlxfrMrYmF6tTPy59nesR7aIodEyLTgDGL2IcH
+# wDW5pLH9vK9VApjSRVNBmoWErQT0pcHUGdUCiw9oVqJM+5ildJis/KR8+D9BpB61
+# qPI0sRG4Sr+2uwl054j3z390IP6hdXGaJEMSisxoWYo4zMNao2BsvYB17qtQP8+o
+# rtUdeC6cWR6N6dJTEcC/KcEdUDDHGo1aE40RxecE6GcvCVtwaFOXo41NAobSY5Ik
 # SIG # End signature block

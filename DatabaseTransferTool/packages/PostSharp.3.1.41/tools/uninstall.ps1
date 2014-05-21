@@ -1,16 +1,5 @@
 ﻿param($installPath, $toolsPath, $package, $project)
 
-
-function PathToUri([string] $path)
-{
-    return new-object Uri('file://' + $path.Replace("%","%25").Replace("#","%23").Replace("$","%24").Replace("+","%2B").Replace(",","%2C").Replace("=","%3D").Replace("@","%40").Replace("~","%7E").Replace("^","%5E"))
-}
-
-function UriToPath([System.Uri] $uri)
-{
-    return [System.Uri]::UnescapeDataString( $uri.ToString() ).Replace([System.IO.Path]::AltDirectorySeparatorChar, [System.IO.Path]::DirectorySeparatorChar)
-}
-
 $targetsFile = [System.IO.Path]::Combine($toolsPath, 'PostSharp.targets')
 
 # Need to load MSBuild assembly if it's not loaded yet.
@@ -19,46 +8,29 @@ Add-Type -AssemblyName 'Microsoft.Build, Version=4.0.0.0, Culture=neutral, Publi
 # Grab the loaded MSBuild project for the project
 $msbuild = [Microsoft.Build.Evaluation.ProjectCollection]::GlobalProjectCollection.GetLoadedProjects($project.FullName) | Select-Object -First 1
 
-# Make the path to the targets file relative.
-$projectUri = PathToUri $project.FullName
-$targetUri = PathToUri $targetsFile
+$itemsToRemove = @()
 
-$relativePath = UriToPath $projectUri.MakeRelativeUri($targetUri)
 
-# Remove previous imports to PostSharp.targets
-$msbuild.Xml.Imports | Where-Object {$_.Project.ToLowerInvariant().EndsWith("postsharp.targets") } | Foreach { 
-	$_.Parent.RemoveChild( $_ ) 
+# Remove stuff from the project.
+$itemsToRemove += $msbuild.Xml.Properties | Where-Object {$_.Name.ToLowerInvariant() -eq "dontimportpostsharp" }
+$itemsToRemove += $msbuild.Xml.Imports | Where-Object { $_.Project.ToLowerInvariant().EndsWith("postsharp.targets") }
+$itemsToRemove += $msbuild.Xml.Targets | Where-Object {$_.Name.ToLowerInvariant() -eq "ensurepostsharpimported" }
+  
+if ($itemsToRemove -and $itemsToRemove.length)
+{
+    foreach ($itemToRemove in $itemsToRemove)
+    {
+        $itemToRemove.Parent.RemoveChild($itemToRemove) | out-null
+    }
+     
+    $project.Save()
+    $project.Object.Refresh()
 }
-
-# Remove references to PostSharp 1.5
-$project.Object.References | Where-Object {$_.Identity.ToLowerInvariant().StartsWith("postsharp.public") } | Foreach { 
-	$_.Remove( )
-}
-
-$project.Object.References | Where-Object {$_.Identity.ToLowerInvariant().StartsWith("postsharp.laos") } | Foreach { 
-	$_.Remove( )
-}
-
-# Set property DontImportPostSharp to prevent locally-installed previous versions of PostSharp to interfere.
-$msbuild.Xml.AddProperty( "DontImportPostSharp", "True" ) | Out-Null
-
-# Add import to PostSharp.targets
-$import = $msbuild.Xml.AddImport($relativePath)
-$import.set_Condition( "Exists('$relativePath')" ) | Out-Null
-[string]::Format("Added import of '{0}'.", $relativePath )
-
-$project.Object.Refresh()
-
-# Asynchronously run setup wizard if necessary. Since the setup wizard is compressed in PostSharp-Tools.exe, the easiest is to run it through MSBuild.
-$msbuildExe = [System.IO.Path]::Combine( [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(), "msbuild.exe")
-"Starting $msbuildExe"
-Start-Process -FilePath $msbuildExe -ArgumentList @("""$toolsPath\PostSharp.targets""", "/t:PostSharp30InstallVsx /p:BuildingInsideVisualStudio=True") -WindowStyle Hidden
-	
 # SIG # Begin signature block
 # MIId/AYJKoZIhvcNAQcCoIId7TCCHekCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUp4qrVw58cNHiqKqN0T0O00jw
-# 2k+gghjsMIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUEq48Mye7NbaUKdF5WvNuLohX
+# ypCgghjsMIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
 # AQUFADCBizELMAkGA1UEBhMCWkExFTATBgNVBAgTDFdlc3Rlcm4gQ2FwZTEUMBIG
 # A1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEdMBsGA1UECxMUVGhh
 # d3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBpbmcg
@@ -197,22 +169,22 @@ Start-Process -FilePath $msbuildExe -ArgumentList @("""$toolsPath\PostSharp.targ
 # YSAoYykxMDEuMCwGA1UEAxMlVmVyaVNpZ24gQ2xhc3MgMyBDb2RlIFNpZ25pbmcg
 # MjAxMCBDQQIQDLZ6+7O4pymGCOAOlM81PjAJBgUrDgMCGgUAoHgwGAYKKwYBBAGC
 # NwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgor
-# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUmX8r8fGH
-# gDaD7ClqQxCdQLxvW8kwDQYJKoZIhvcNAQEBBQAEggEAhBIfhzQvQBvrJQ2hAcsm
-# pQHhMxeg4ZxSIJn2RAWEgQytwdT7vg+8qqKVOMDce+2TvzXWn7RXqC5keVrIA+KE
-# 7sVZKU/G+SmoR2ymAH1Bwv+AWAzjN+UbcWpoPlnFndeNg1KC2viQSZ03ycL7yDlm
-# ynkaLP4Ha0TYrnPdRh8K7kzG0YiHGqAWgA0lNi21UJMuGV9hHopJM3mWkpixBHN5
-# pHgSVXwoRL6MXYDk1V/lTxHmLyqFxzHR07X25fmEBxXhOIcoehtF5XOCmP9Z1I9L
-# YMNZNQ6BuMBaPRttuW6oMA6EiVvHPN4BUKYmeDd3eWRt3j3FlwJemSn2FBKBvLN5
-# JaGCAgswggIHBgkqhkiG9w0BCQYxggH4MIIB9AIBATByMF4xCzAJBgNVBAYTAlVT
+# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUaG5dMz3s
+# wY9ouNQOA/00yhh+ylcwDQYJKoZIhvcNAQEBBQAEggEAnmogOVlhAz3xHx7R0AvF
+# amciTyiC4+yPlU0+O9FtB818NPg8icYlxuQb9MVhAJLTv6lGlLPuEEOtQIU/A+tg
+# tpr8O1zlsOcc7g17zKPpnBovy2i07gfGqdWFtaRJOktPait4kkefLGep2pbJ+klt
+# z/KSwdufGlcpWK98sW20Kj+RDjLv4tAB4nJykKWj6hShLDD+9Fq3PsPVyatFysJY
+# YdGpjan1Z0fIaaZKdQ3xEehHtjXq/wI9HJ3M6wQGPh+LyeubO5wA2AI6d8IRlF2p
+# hlpfs95U4K5E4lop5jaFa2qFs15XqqaPNuMMqUZPmryR1JX1tI3i2Ej8hnxOVXRy
+# c6GCAgswggIHBgkqhkiG9w0BCQYxggH4MIIB9AIBATByMF4xCzAJBgNVBAYTAlVT
 # MR0wGwYDVQQKExRTeW1hbnRlYyBDb3Jwb3JhdGlvbjEwMC4GA1UEAxMnU3ltYW50
 # ZWMgVGltZSBTdGFtcGluZyBTZXJ2aWNlcyBDQSAtIEcyAhAOz/Q4yP6/NW4E2GqY
 # GxpQMAkGBSsOAwIaBQCgXTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqG
-# SIb3DQEJBTEPFw0xMzA5MjAxODIyMjBaMCMGCSqGSIb3DQEJBDEWBBSWecDw1jKx
-# 8Xid+WGcT1XUK0jWHDANBgkqhkiG9w0BAQEFAASCAQA3+wZxXj75sr+AgmizsjyQ
-# qzjwZSdnO1xEo9x7xW4955TXjsX5PN1wlz6fm8eLh64fL3i/ooRrn1qThXb6nv7c
-# EJ+AcQk6YJAhVje6aswrC3vt+SGMAhsNpPaZ0IlmDmdY2N0EkIZmW0samPZSrJAS
-# 27lQAaDaf/3HGb8RxN65EqZ3GhvTv1zXjAUFCdPe5EhfsdQZjmeZOPp9LHeW42A9
-# fQ2QyD8rlIgdlapVh2VhB5I2BQVx2LQnM51X4AlywG+T+A9DvaWnGlSJ6dc3lFnI
-# 0rbYkzd5j99uOqQsrW0NlvUriZbgQskPRaOUIvhJXTjj4QUij2d69DQWr7KPTVY2
+# SIb3DQEJBTEPFw0xNDA1MjExMTQ2NDRaMCMGCSqGSIb3DQEJBDEWBBTgoenDpJMA
+# 9JF0sskcnqT8EUET/TANBgkqhkiG9w0BAQEFAASCAQBGdTE5fLQzZUYbUUt02DrR
+# +0NxeqXofy4km/mPBBQNU6F4n+lgWc8L7Fx17LQg42p4j1gScKjjOQWzPWTTIjhs
+# wxaxjZNYxafK4RKzcNRNcLgubhm11tLCKj83OHrdIR2/QlGaT3a+0m7quNecs6bX
+# /xBEHjZ+osmYsNgz3ZgwXAMEAlg+ij9ByZcLEBgcnSMz7+St5TFocicDLIzDnvSA
+# FZd/tP1/k7wYNatncPyldsxaNmHo0QkFI60gV+gc9dvofUFKrLyrajxZiNNA+Hc6
+# Yv1HpSIx+8MuZ1kQCi93FzF+vgMNo1mrSM92c/SomeG/GE1aR9COtYVBbyYk5GTT
 # SIG # End signature block
